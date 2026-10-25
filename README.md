@@ -9,24 +9,13 @@
 ╚═╝     ╚═╝  ╚═╝╚═╝     ╚══════╝╚══════╝╚═╝  ╚═╝╚══════╝╚══════╝╚══════╝
 ```
 
-### two illustrated deep dives into PHP memory-corruption exploit chains
+### two deep dives into PHP memory-corruption exploit chains
 
-*deep dive by Aasritha · pixel-art edition · 100% static, 0% actually dangerous*
-
-[![pages](https://img.shields.io/badge/live-github%20pages-2ea44f?style=flat-square)](https://aasritha-y.github.io/php2shell/)
-[![type](https://img.shields.io/badge/type-educational-3b7dd8?style=flat-square)](#)
+*deep dive by Aasritha · pixel-art edition*
 
 </div>
 
 ---
-
-```console
-$ ./php2shell --explain
-[*] loading walkthroughs ....... done
-[*] rendering pixel diagrams ... done
-[*] arming payloads ........... skipped (it's just a webpage)
-[+] ready. open index.html and enjoy.
-```
 
 ## what's inside
 
