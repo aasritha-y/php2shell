@@ -1,21 +1,29 @@
 <div align="center">
 
 ```
-██████╗ ██╗  ██╗██████╗ ██████╗ ███████╗██╗  ██╗███████╗██╗     ██╗
-██╔══██╗██║  ██║██╔══██╗╚════██╗██╔════╝██║  ██║██╔════╝██║     ██║
-██████╔╝███████║██████╔╝ █████╔╝███████╗███████║█████╗  ██║     ██║
-██╔═══╝ ██╔══██║██╔═══╝ ██╔═══╝ ╚════██║██╔══██║██╔══╝  ██║     ██║
+██████╗ ██╗  ██╗██████╗ ██████╗ ███████╗██╗  ██╗███████╗██╗     ██╗     
+██╔══██╗██║  ██║██╔══██╗╚════██╗██╔════╝██║  ██║██╔════╝██║     ██║     
+██████╔╝███████║██████╔╝ █████╔╝███████╗███████║█████╗  ██║     ██║     
+██╔═══╝ ██╔══██║██╔═══╝ ██╔═══╝ ╚════██║██╔══██║██╔══╝  ██║     ██║     
 ██║     ██║  ██║██║     ███████╗███████║██║  ██║███████╗███████╗███████╗
 ╚═╝     ╚═╝  ╚═╝╚═╝     ╚══════╝╚══════╝╚═╝  ╚═╝╚══════╝╚══════╝╚══════╝
 ```
 
-### two deep dives into PHP memory-corruption exploit chains
+### two illustrated deep dives into PHP memory-corruption exploit chains
 
 *deep dive by Aasritha · pixel-art edition*
 
 </div>
 
 ---
+
+```console
+$ ./php2shell --explain
+[*] loading walkthroughs ....... done
+[*] rendering pixel diagrams ... done
+[*] arming payloads ........... skipped (it's just a webpage)
+[+] ready. open index.html and enjoy.
+```
 
 ## what's inside
 
