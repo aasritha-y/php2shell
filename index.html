@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PHP2Shell — Deep Dives</title>
+    <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+    <header class="site-header">
+        <div class="logo">
+            <span class="logo-icon">&#9672;</span>
+            <span>PHP2Shell &mdash; Memory Corruption Deep Dives</span>
+        </div>
+        <nav class="nav">
+            <a href="index.html" class="active">Home</a>
+            <a href="109618.html">PHP2Shell &middot; 109618</a>
+            <a href="109619.html">PHP2Shell &middot; 109619</a>
+        </nav>
+    </header>
+
+    <main class="container">
+<section class="hero">
+  <h1>PHP2Shell</h1>
+  <p class="subtitle">Two illustrated deep dives into PHP memory-corruption exploit chains.</p>
+</section>
+
+<div class="gallery-grid">
+  <a href="109618.html" class="gallery-card">
+    <div class="image-wrapper red-bg">
+      <div class="pixel-icon"><i class="sprite sprite-warning"></i></div>
+    </div>
+    <div class="card-content">
+      <div class="card-tag red-tag">&#9673; DEEP DIVE &middot; CVE-2026-109618</div>
+      <h2>The memory-exhaustion chain</h2>
+      <p>A step-by-step walkthrough of a use-after-free triggered by running the worker out of memory.</p>
+      <span class="card-link">View walkthrough &rarr;</span>
+    </div>
+  </a>
+
+  <a href="109619.html" class="gallery-card">
+    <div class="image-wrapper green-bg">
+      <div class="pixel-icon"><i class="sprite sprite-star"></i></div>
+    </div>
+    <div class="card-content">
+      <div class="card-tag" style="background: var(--green); color: var(--border);">&#9733; DEEP DIVE &middot; CVE-2026-109619</div>
+      <h2>The stale global state chain</h2>
+      <p>A fatal error leaves a dangling pointer in the worker's internal state, and the next request walks into a cross-request use-after-free.</p>
+      <span class="card-link">View walkthrough &rarr;</span>
+    </div>
+  </a>
+</div>
+    </main>
+
+    <footer class="site-footer">
+        <p>Educational Purposes Only &middot; &copy; Aasritha</p>
+    </footer>
+</body>
+</html>

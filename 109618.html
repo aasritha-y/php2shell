@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PHP2Shell · CVE-2026-109618</title>
+    <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+    <header class="site-header">
+        <div class="logo">
+            <span class="logo-icon">&#9672;</span>
+            <span>PHP2Shell &mdash; Memory Corruption Deep Dives</span>
+        </div>
+        <nav class="nav">
+            <a href="index.html">Home</a>
+            <a href="109618.html" class="active">PHP2Shell &middot; 109618</a>
+            <a href="109619.html">PHP2Shell &middot; 109619</a>
+        </nav>
+    </header>
+
+    <main class="container">
+<section class="hero">
+  <h1>PHP2Shell &middot; CVE-2026-109618</h1>
+  <p class="subtitle">Deep dive: the memory-exhaustion use-after-free.</p>
+</section>
+
+<div class="report-list">
+  <div class="report-entry report-entry-unverified walkthrough" style="flex-direction: column;">
+    <div class="card-tag" style="background: var(--muted); color: #fff; margin-bottom: 16px;">CVE-2026-109618</div>
+
+    <p class="walk-lead">The idea: starve PHP of memory at exactly the wrong moment, so a freed memory block is still pointed to, then move your own data into that block and let the engine run it.</p>
+
+    <!-- Legend: what the colored blocks mean -->
+    <div class="mem-legend">
+      <div class="legend-item"><span class="swatch mem-free"></span> Free memory</div>
+      <div class="legend-item"><span class="swatch mem-reqa"></span> Owned by Request A</div>
+      <div class="legend-item"><span class="swatch mem-dangling"></span> Freed, but still pointed to (dangling)</div>
+      <div class="legend-item"><span class="swatch mem-reqb"></span> Overwritten by attacker</div>
+    </div>
+
+    <!-- Who's who -->
+    <div class="lane-tabs">
+      <div class="lane-tab lane-attacker"><strong>CLIENT / ATTACKER</strong><br>sends crafted requests</div>
+      <div class="lane-tab lane-engine"><strong>PHP ENGINE</strong><br>manages memory (C level)</div>
+    </div>
+
+    <!-- Timeline -->
+    <div class="stage-track">
+
+      <!-- 1 -->
+      <div class="stage stage-attacker">
+        <span class="stage-num">1</span>
+        <h4><span class="who who-attacker">ATTACKER</span> Send a massive upload (Request A)</h4>
+        <p>The attacker starts a huge multipart upload with the <code>session.upload_progress</code> flag switched on. That flag makes PHP track the upload's progress, so it allocates a small 256-byte object to hold the progress data and stores a pointer to it in the <code>$_SESSION</code> array.</p>
+        <p class="mem-note">Note: <code>session.upload_progress</code> is the one feature that lets an incoming request make PHP build this internal 256-byte object and store a pointer to it in an entry inside the session array (<code>$_SESSION</code>), which is why the attack starts here.</p>
+        <div class="mem-block">
+          <div class="mem-cell mem-reqa">A</div>
+          <div class="mem-cell mem-reqa">A</div>
+          <div class="mem-cell mem-reqa">A</div>
+          <div class="mem-cell mem-reqa">A</div>
+        </div>
+        <div class="mem-label">Block X: allocated, ledger says "owned by Request A"</div>
+      </div>
+
+      <!-- 2 -->
+      <div class="stage stage-crash">
+        <span class="stage-num">2</span>
+        <h4><span class="who who-engine">ENGINE</span> <span class="phase-tag phase-oom">OOM</span> Memory limit hit &rarr; emergency bailout</h4>
+        <p>The upload is big enough to blow past <code>memory_limit</code>. PHP throws a fatal error and uses <code>longjmp()</code> to jump straight to cleanup, skipping the normal, orderly teardown of variables.</p>
+      </div>
+
+      <!-- 3 -->
+      <div class="stage stage-crash">
+        <span class="stage-num">3</span>
+        <h4><span class="who who-engine">ENGINE</span> <span class="phase-tag phase-uaf">UAF created</span> Block freed, but the pointer survives</h4>
+        <p>During the panic, OS reclaims the 256-byte block X allocated in step 1 as free memory. But the <code>$_SESSION</code> pointer from step 1 still aims at that same block: a live pointer to dead memory.</p>
+        <div class="mem-block">
+          <div class="mem-cell mem-dangling">?</div>
+          <div class="mem-cell mem-dangling">?</div>
+          <div class="mem-cell mem-dangling">?</div>
+          <div class="mem-cell mem-dangling">?</div>
+        </div>
+        <p class="bug-flag"><span class="bug-flag-tag">THE CORE BUG</span> The <code>longjmp()</code> from step 2 is the root cause: because it skips teardown, the pointer in <code>$_SESSION</code> is never cleared. Everything that follows is just the fallout of this one missed cleanup: a live pointer left aimed at a block that has already been freed.</p>
+        </div>
+
+      <!-- 4 -->
+      <div class="stage stage-attacker">
+        <span class="stage-num">4</span>
+        <h4><span class="who who-attacker">ATTACKER</span> <span class="phase-tag phase-uaf">UAF reclaim</span> Send a second request to reclaim the slot</h4>
+        <p>The attacker immediately sends Request B. The request is crafted such that the size of Request B is same as the block X that was freed. The OS hence offers the just-freed Block X to request B and the attacker's bytes are copied into it.</p>
+        <div class="mem-block">
+          <div class="mem-cell mem-reqb">B</div>
+          <div class="mem-cell mem-reqb">B</div>
+          <div class="mem-cell mem-reqb">B</div>
+          <div class="mem-cell mem-reqb">B</div>
+        </div>
+        <div class="mem-label">Block X: now filled with attacker data shaped like a fake object</div>
+      </div>
+
+      <!-- 5 -->
+      <div class="stage stage-engine">
+        <span class="stage-num">5</span>
+        <h4><span class="who who-engine">ENGINE</span> <span class="phase-tag phase-uaf">UAF triggered</span> Shutdown follows the stale pointer</h4>
+        <p>Every PHP object has a destructor: a cleanup function the engine runs when the object is discarded. At shutdown it goes through the session data and runs each one.</p>
+        <p>The garabage collector follows the stale pointer to block X, which holds Request B's payload, so the engine runs the attacker's code instead.</p>
+      </div>
+
+      <!-- 6 -->
+      <div class="stage stage-rce">
+        <span class="stage-num">6</span>
+        <h4><span class="who who-engine">ENGINE</span> The fake “destructor” runs attacker code</h4>
+        <p>The attacker crafted the fake object intelligently to point to specific memory locations of the host that can execute code. The engine calls the destructor running the attacker's command.</p>
+        <div class="rce-banner">
+          <strong>Remote code execution</strong>
+          <span class="cmd">$ system("id")  &rarr;  uid=33(www-data)</span>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- DEEP DIVE: the same chain, explained in detail                -->
+    <!-- ============================================================ -->
+    <hr class="deepdive-divider">
+    <h2 class="deepdive-title">Deep dive: the use-after-free, step by step</h2>
+
+    <div class="dd-section">
+
+    <!-- BACKGROUND: key terms used throughout -->
+    <div class="dd-primer">
+      <div class="primer-head">First, two terms you'll see throughout</div>
+      <dl>
+        <dt>ZendMM (Zend Memory Manager)</dt>
+        <dd>PHP's own memory manager, built on top of the operating system's memory. Instead of asking the OS for memory every time, PHP asks ZendMM, which hands out small blocks and keeps a ledger of who owns what. It is a middle man between your PHP script and the computer's raw memory, tracking every allocation so it can be freed cleanly at the end of the request.</dd>
+        <dt>zend_object</dt>
+        <dd>The C structure PHP uses to represent an object in memory. Every object you create in PHP code is really a <code>zend_object</code> behind the scenes: a fixed-size block of bytes holding
+          <ol class="primer-list">
+            <li>its type,</li>
+            <li>its handlers, which include a <strong> pointer to its own destructor </strong>, the function that runs when the object is cleaned up</li>
+            <li>its data.</li>
+          </ol>
+          This attack works by faking one of these structures so PHP runs the attacker’s chosen “destructor”.</dd>
+      </dl>
+    </div>
+
+    <!-- BACKGROUND: the two ledgers -->
+    <h2 style="font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 1.25rem; margin: 8px 0 14px;">The two ledgers</h2>
+    <p class="dd-p">
+      To see how the trick works, you need to know that two separate systems are keeping track of the same memory, and they don't talk to each other.
+    </p>
+    <p class="dd-p">
+      <strong>The OS ledger</strong> tracks physical RAM pages. When PHP asks for memory, the OS hands over a page and marks it “in use” and when PHP frees it, the OS marks it “free”. The OS has no idea what a <code>zend_object</code> is. It only tracks raw blocks.
+    </p>
+    <p class="dd-p">
+      <strong>The ZendMM ledger</strong> is PHP's own accountant, one level up. When the engine calls <code>emalloc()</code>, ZendMM records a row (“Block X is owned by this variable”) and also gets the block from the OS underneath. At the end of a request ZendMM walks its ledger and frees everything.
+    </p>
+
+    <figure class="dd-figure">
+      <svg viewBox="0 0 640 230" role="img" aria-label="The session.upload_progress feature makes PHP call emalloc to build the 256-byte zend_object, Block X. emalloc records a row in the ZendMM ledger that Block X is owned, and takes the raw block from the OS ledger underneath. Both ledgers end up tracking the same Block X." xmlns="http://www.w3.org/2000/svg" style="max-width:100%;height:auto;font-family:'Space Grotesk',sans-serif;">
+        <defs>
+          <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+
+        <!-- caller: upload_progress -> emalloc -->
+        <rect x="20" y="92" width="170" height="52" rx="6" fill="none" stroke="currentColor" stroke-width="2"/>
+        <text x="105" y="114" text-anchor="middle" font-size="12.5" font-weight="700" fill="currentColor">session.upload_progress</text>
+        <text x="105" y="131" text-anchor="middle" font-size="11" fill="currentColor">makes PHP call emalloc()</text>
+
+        <!-- ZendMM ledger -->
+        <rect x="270" y="24" width="170" height="66" rx="6" fill="none" stroke="currentColor" stroke-width="2"/>
+        <text x="355" y="48" text-anchor="middle" font-size="12.5" font-weight="700" fill="currentColor">ZendMM ledger</text>
+        <text x="355" y="66" text-anchor="middle" font-size="10.5" fill="currentColor">“Block X is owned”</text>
+        <text x="355" y="80" text-anchor="middle" font-size="10.5" fill="currentColor">prevents double-free</text>
+
+        <!-- OS ledger -->
+        <rect x="270" y="146" width="170" height="66" rx="6" fill="none" stroke="currentColor" stroke-width="2"/>
+        <text x="355" y="170" text-anchor="middle" font-size="12.5" font-weight="700" fill="currentColor">OS ledger</text>
+        <text x="355" y="188" text-anchor="middle" font-size="10.5" fill="currentColor">raw RAM pages</text>
+        <text x="355" y="202" text-anchor="middle" font-size="10.5" fill="currentColor">“in use” / “free”</text>
+
+        <!-- the actual 256-byte block -->
+        <rect x="486" y="82" width="148" height="74" rx="6" fill="none" stroke="#c0392b" stroke-width="2"/>
+        <text x="560" y="108" text-anchor="middle" font-size="12.5" font-weight="700" fill="#c0392b">Block X</text>
+        <text x="560" y="126" text-anchor="middle" font-size="10.5" fill="#c0392b">256-byte</text>
+        <text x="560" y="140" text-anchor="middle" font-size="10.5" fill="#c0392b">zend_object</text>
+
+        <!-- upload_progress -> ZendMM (records row) -->
+        <line x1="190" y1="110" x2="266" y2="64" stroke="currentColor" stroke-width="2" marker-end="url(#ah)"/>
+        <text x="214" y="78" text-anchor="middle" font-size="10.5" fill="currentColor">records row</text>
+        <!-- ZendMM -> OS (gets block) -->
+        <line x1="355" y1="90" x2="355" y2="142" stroke="currentColor" stroke-width="2" marker-end="url(#ah)"/>
+        <text x="365" y="120" font-size="10.5" fill="currentColor">gets block</text>
+        <!-- OS -> Block X -->
+        <line x1="440" y1="174" x2="482" y2="138" stroke="currentColor" stroke-width="2" marker-end="url(#ah)"/>
+        <!-- ZendMM also maps Block X (dashed) -->
+        <line x1="440" y1="52" x2="482" y2="100" stroke="currentColor" stroke-width="2" stroke-dasharray="4 3" marker-end="url(#ah)"/>
+      </svg>
+      <figcaption class="dd-figure-cap">The <code>session.upload_progress</code> feature is what makes PHP build the <code>zend_object</code> recording a row in the ZendMM ledger (“Block X is owned”). Both ledgers now track the same Block X.</figcaption>
+    </figure>
+
+    <p class="dd-p">
+      Everything lives in RAM, not on disk. An HTTP request arrives over the network, the kernel drops its bytes into a buffer in RAM, and PHP's parser reads from that buffer and writes the parsed data into a heap block, also in RAM. Nothing touches the disk until PHP explicitly writes a file. So Request A's object and Request B's payload are both just regions of the worker's memory, which is why one can land exactly where the other used to be.
+    </p>
+
+    <!-- PART 1: THE CRASH -->
+    <div class="card-tag red-tag" style="margin: 28px 0 16px;">PART 1: THE CRASH</div>
+    <h2><span class="phase-tag phase-oom">OOM</span><span class="phase-tag phase-uaf">UAF created</span> The OOM &amp; the dangling pointer</h2>
+    <p class="dd-p">
+      In a normal request, PHP tracks variables using the <strong>Zend Memory Manager (ZendMM)</strong>. 
+    </p>
+    <p class="dd-p">  
+    The attacker passes request A with the flag to track upload progress. So when Request A uploads a file, ZendMM allocates a 256-byte <code>zend_object</code> (Block X) to track the progress and stores the pointer in the <code>$_SESSION</code> array. Do notice the emphasis that this is the only way an http request could ever create a zend object.
+    </p>
+
+    <div class="dd-diagram">
+      <div class="struct-diagram">
+        <div class="struct-panel">
+          <div class="struct-head">$_SESSION upload progress (what PHP shows you)</div>
+<pre class="struct-code">$_SESSION["upload_progress_myupload"] = [
+  <span class="k">"start_time"</span>     =&gt; 1234567890,
+  <span class="k">"content_length"</span> =&gt; 57343257,
+  <span class="k">"bytes_processed"</span>=&gt; 54321,
+  <span class="k">"done"</span>           =&gt; false,
+  <span class="k">"files"</span> =&gt; [ ... ],
+];</pre>
+        </div>
+
+        <div class="struct-arrow">
+          <span class="sa-glyph">&rarr;</span>
+          <span class="sa-label">is really a pointer to</span>
+        </div>
+
+        <div class="struct-panel">
+          <div class="struct-head">Block X: the C <code style="color:#fff;background:none;border:none;padding:0;">zend_object</code> it points at</div>
+          <div class="cobj-row"><span class="cobj-field">type</span><span class="cobj-val">IS_OBJECT</span></div>
+          <div class="cobj-row cobj-dtor"><span class="cobj-field">destructor / handler</span><span class="cobj-val">&rarr; real cleanup fn</span></div>
+          <div class="cobj-row"><span class="cobj-field">properties</span><span class="cobj-val">the array data above</span></div>
+        </div>
+      </div>
+      <div class="dd-diagram-cap">The array you see in PHP is the friendly view. Underneath, <code>$_SESSION</code> holds a pointer to a C <code>zend_object</code> in Block X, and that object carries the <strong>destructor</strong>. The attack never touches the array; it overwrites this C object so the destructor slot points at <code>system()</code> instead.</div>
+    </div>
+
+    <div class="dd-diagram">
+      <table class="ledger">
+        <caption>ZendMM ledger &amp; $_SESSION (before crash)</caption>
+        <thead>
+          <tr><th>Memory block</th><th>Owner (ledger)</th><th>$_SESSION pointer</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="mono">Block X (256 B)</td>
+            <td><span class="pill-ok">Request A</span></td>
+            <td class="mono">$_SESSION['progress'] = &amp;BlockX</td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="dd-diagram-cap">Everything is consistent: the ledger and the session pointer agree on who owns Block X.</div>
+    </div>
+
+    <p class="dd-p">
+      <strong> The attacker sends a massive payload, causing PHP to hit its <code>memory_limit</code> cause OOM fault. PHP panics and calls <code>longjmp()</code>. </strong>
+    </p>
+    <p class="dd-p">
+      <code>longjmp()</code> is a violent C function: it jumps the execution pointer directly to the shutdown phase, completely skipping the normal variable teardown. Because teardown is skipped, <strong>ZendMM's ledger is never updated</strong> and the pointer inside <code>$_SESSION</code> is never deleted. The OS marks Block X as “free” to save memory, but PHP still thinks it owns it.
+    </p>
+
+    <div class="dd-diagram">
+      <table class="ledger">
+        <caption>After the crash: the ledger goes stale</caption>
+        <thead>
+          <tr><th>Memory block</th><th>Owner (ledger)</th><th>$_SESSION pointer</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="mono">Block X (freed by OS)</td>
+            <td><span class="pill-stale">still "Request A"</span></td>
+            <td class="mono">$_SESSION['progress'] = &amp;BlockX</td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="dd-diagram-cap">The block is free, but both the ledger and <span class="mono">$_SESSION</span> still point at it. That live pointer to dead memory is the bug.</div>
+    </div>
+
+    <!-- PART 2: THE REUSE -->
+    <div class="card-tag blue-tag" style="margin: 32px 0 16px;">PART 2: THE REUSE</div>
+    <h2><span class="phase-tag phase-uaf">UAF reclaim</span> Why Request B's bytes get in</h2>
+    <p class="dd-p">
+      Both requests are parsed into a temporary buffer the same way. The difference is the flag: PHP only builds a tracked <code>zend_object</code> when it reads the <code>session.upload_progress</code> flag, which Request A had and already did. Request B is sent <em>without</em> that flag, so PHP never builds a second tracked object for the same block.
+    </p>
+    <p class="dd-p">
+      Request B is also crafted so its payload is 256 bytes, exactly the size of the Block X that was just freed. If it arrives soon enough after the crash, the OS hands that same freed block back to Request B. Keep in mind that PHP still believes this block is holding upload progress, because nothing ever cleared the <code>$_SESSION</code> pointer.
+    </p>
+    <p class="dd-p">
+      So Request B's body is written into that memory, and the attacker's data now sits in the exact slot <code>$_SESSION</code> still points at, with no ownership check and no double-free to stop it.
+    </p>
+
+    <div class="dd-diagram">
+      <div class="path-compare">
+        <div class="path path-bad">
+          <div class="path-tag">Request A (has the flag)</div>
+          <div class="path-flow">
+            <span class="path-node">parsed into a temporary buffer</span>
+            <span class="path-arrow">&rarr;</span>
+            <span class="path-node flag">upload_progress flag read</span>
+            <span class="path-arrow">&rarr;</span>
+            <span class="path-node">PHP builds a tracked zend_object</span>
+            <span class="path-arrow">&rarr;</span>
+            <span class="path-result">Block X allocated</span>
+          </div>
+        </div>
+        <div class="path path-good">
+          <div class="path-tag">Request B (no flag)</div>
+          <div class="path-flow">
+            <span class="path-node">parsed into a temporary buffer</span>
+            <span class="path-arrow">&rarr;</span>
+            <span class="path-node flag">no flag, nothing to build</span>
+            <span class="path-arrow">&rarr;</span>
+            <span class="path-node">bytes land in freed memory</span>
+            <span class="path-arrow">&rarr;</span>
+            <span class="path-result">Block X overwritten, no crash</span>
+          </div>
+        </div>
+      </div>
+      <div class="dd-diagram-cap">Both requests are parsed into a temporary buffer the same way. The fork is the <code>upload_progress</code> flag: when PHP reads it in Request A, it builds the tracked object (Block X). Request B has no flag, so PHP never builds a new tracked object; its bytes just overwrite the freed block, with no ownership check and no double-free.</div>
+    </div>
+
+    <!-- PART 3: THE PAYLOAD -->
+    <div class="card-tag yellow-tag" style="margin: 32px 0 16px;">PART 3: THE PAYLOAD</div>
+    <h2>Forging the fake <code>zend_object</code></h2>
+    <p class="dd-p">
+      The attacker doesn't send random letters. They send a binary payload crafted to look exactly like a C struct. The destructor code is pointed to an address which you want to execute and extract information about the user.
+    </p>
+    <p class="dd-p">
+      The attacker shapes the 256 bytes to match <span class="mono">zend_object</span> like this:
+    </p>
+    <div class="dd-diagram">
+      <div class="pl-head">
+        <span>Fake <span class="mono">zend_object</span> written into Block X</span>
+        <span class="pl-size">256 bytes</span>
+      </div>
+
+      <!-- the memory rectangle, split into proportional segments -->
+      <div class="pl-bar">
+        <div class="pl-seg seg-type">
+          <span class="pl-seg-name">TYPE</span>
+          <span class="pl-seg-bytes">0&ndash;8</span>
+        </div>
+        <div class="pl-seg seg-handler">
+          <span class="pl-seg-name">HANDLER</span>
+          <span class="pl-seg-bytes">8&ndash;16</span>
+        </div>
+        <div class="pl-seg seg-arg">
+          <span class="pl-seg-name">ARG</span>
+          <span class="pl-seg-bytes">16&ndash;24</span>
+        </div>
+        <div class="pl-seg seg-pad">
+          <span class="pl-seg-name">PADDING</span>
+          <span class="pl-seg-bytes">24&ndash;256</span>
+        </div>
+      </div>
+
+      <!-- arrows pointing down from the three important segments -->
+      <div class="pl-arrows">
+        <div class="pl-arrow a-type">&darr;</div>
+        <div class="pl-arrow a-handler">&darr;</div>
+        <div class="pl-arrow a-arg">&darr;</div>
+        <div class="pl-arrow a-pad"></div>
+      </div>
+
+      <!-- callouts for each pointed-at field -->
+      <div class="pl-callouts">
+        <div class="pl-callout c-type">
+          <span class="f-name">Type tag</span>
+          <span class="f-val">IS_OBJECT</span>
+          <span class="f-note">Convinces PHP this is a real object with a destructor to run.</span>
+        </div>
+        <div class="pl-callout c-handler">
+          <span class="f-name">Handler pointer</span>
+          <span class="f-val">0x7FFD5C3A</span>
+          <span class="f-note">Repointed at <code>system()</code> instead of a real destructor.</span>
+        </div>
+        <div class="pl-callout c-arg">
+          <span class="f-name">Argument pointer</span>
+          <span class="f-val">0x7FFD5C4B</span>
+          <span class="f-note">Points at the string <code>"id"</code>, the command that runs.</span>
+        </div>
+      </div>
+
+      <div class="dd-diagram-cap">Only the first 24 bytes matter. The rest is padding that fills out the reclaimed 256-byte slot.</div>
+    </div>
+    <!-- PART 4: THE ADDRESS -->
+    <div class="card-tag" style="background: #7a4fc9; color: #fff; margin: 32px 0 16px;">PART 4: THE ADDRESS</div>
+    <h2>Finding where <code>system()</code> lives in memory</h2>
+    <p class="dd-p">
+      The handler in the fake object has to point at the exact memory address of <code>system()</code>. That is hard, because of <strong>ASLR (Address Space Layout Randomisation)</strong>: on every run the operating system loads libraries at a different random base address, so <code>system()</code> is never at a fixed, known location. The attacker has to work out where it landed <em>this time</em>.
+    </p>
+    <p class="dd-p">
+      In practice there are a few reliable ways to recover that address:
+    </p>
+
+    <div class="dd-diagram">
+      <div class="addr-list">
+        <div class="addr-item">
+          <span class="addr-num">1</span>
+          <div class="addr-body">
+            <span class="addr-title">Leak it from the process itself</span>
+            <span class="addr-text">An exposed <code>phpinfo()</code> page, a verbose stack trace, or a separate memory-disclosure bug prints real pointers. From one leaked address the attacker computes the library's base, then adds the known fixed offset of <code>system()</code> within that library.</span>
+          </div>
+        </div>
+        <div class="addr-item">
+          <span class="addr-num">2</span>
+          <div class="addr-body">
+            <span class="addr-title">Compute it from the libc version</span>
+            <span class="addr-text">If the server's libc build is known (from headers, an error, or fingerprinting), the offset of <code>system()</code> inside that exact libc is a constant. Leaked base address plus that constant gives the real address.</span>
+          </div>
+        </div>
+        <div class="addr-item">
+          <span class="addr-num">3</span>
+          <div class="addr-body">
+            <span class="addr-title">Brute-force a weak layout</span>
+            <span class="addr-text">On 32-bit systems, or where ASLR entropy is low or the worker keeps restarting at the same base, the attacker can simply try many candidate addresses until one works. Slow and noisy, but sometimes enough.</span>
+          </div>
+        </div>
+      </div>
+      <div class="dd-diagram-cap">The common thread: leak one real address, then turn it into the address of <code>system()</code> using a known, fixed offset.</div>
+    </div>
+
+    <p class="dd-p">
+      Without one of these, the handler points at the wrong place and the process just crashes instead of running a command. Recovering the address is what turns a crash into reliable code execution.
+    </p>
+
+    <!-- PART 5: THE EXECUTION -->
+    <div class="card-tag" style="background: var(--green); color: #1a1a2e; margin: 32px 0 16px;">PART 5: THE EXECUTION</div>
+    <h2><span class="phase-tag phase-uaf">UAF triggered</span> Shutdown and the fake destructor</h2>
+    <p class="dd-p">
+      The PHP worker process runs <code>php_request_shutdown()</code> to clean up sockets after each request.
+    </p>
+    <p class="dd-p">
+      The shutdown routine walks the <code>$_SESSION</code> array, reads the <strong>dangling pointer</strong> that was never deleted, and follows it to Block X. It sees the attacker's fake object, reads the “handler” pointer, and calls it. This is where the <strong> UAF is triggered </strong>.
+    </p>
+    <div class="rce-banner" style="margin-bottom: 24px;">
+      <strong>Remote code execution</strong>
+      <span class="cmd">php_request_shutdown() &rarr; follows pointer &rarr; calls 0x7FFD5C3A &rarr; system("id")</span>
+    </div>
+
+    <!-- PART 6: THE MEMORY -->
+    <div class="card-tag" style="background: var(--muted); color: #fff; margin: 32px 0 16px;">PART 6: THE MEMORY</div>
+    <h2>Why doesn't <code>php_request_shutdown()</code> remove the memory ZendMM entry?</h2>
+    <p class="dd-p">
+     If shutdown is the thing that normally frees everything, so why doesn't it notice that Block X was already freed and delete the stale pointer?</em>
+    </p>
+    <p class="dd-p">
+      Because shutdown does not re-check ownership. It simply walks <code>$_SESSION</code>, trusts whatever pointer it finds, and calls the handler. The normal teardown that <em>would</em> have removed the pointer when Block X was freed never ran, because the crash used <code>longjmp()</code> to jump straight past it. So from shutdown's point of view the pointer looks perfectly valid, and it follows it into memory that has since been reused.
+    </p>
+    <p class="dd-p">
+      This raises a question: if Request A was aborted, how does shutdown still run? The answer is that aborting the request does not kill the process doing the work. PHP runs inside a <strong>worker process</strong> that handles many requests one after another. A fatal error ends the current script (request A) but the worker still runs and performs the worker's shutdown routine.</p>
+
+    <h3 style="margin: 32px 0 12px;">How a fix breaks the chain</h3>
+    <div class="alert" style="background: #e3fbe9; border-color: var(--green); color: #1f7a3d;">
+      Modern PHP (8.2.35+) replaces the violent <code>longjmp()</code> with a “soft OOM” mechanism, letting the engine gracefully unwind the stack and safely reset the ZendMM ledger and <code>$_SESSION</code> array, so the dangling pointer never exists in the first place.
+    </div>
+
+    </div><!-- /.dd-section -->
+
+  </div>
+</div>
+
+    </main>
+
+    <footer class="site-footer">
+        <p>Educational Purposes Only &middot; &copy; Aasritha</p>
+    </footer>
+</body>
+</html>
